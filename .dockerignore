@@ -43,3 +43,9 @@ docker-compose*.yml
 *.mp3
 *.flac
 *.ogg
+
+# Model checkpoints (mounted as volume, don't bake into image)
+checkpoints/
+*.pt
+*.bin
+*.safetensors

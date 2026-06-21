@@ -16,5 +16,8 @@ pydantic>=2.0
 websockets
 python-dotenv
 
+# Quantization support
+bitsandbytes>=0.43.0
+
 # omniASR
 omnilingual-asr

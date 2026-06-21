@@ -5,7 +5,7 @@
 # ============================================
 # Base image with CUDA support
 # ============================================
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 
 # Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -34,6 +34,7 @@ COPY requirements.txt .
 
 # Install Python packages with uv (much faster)
 RUN uv pip install --system --no-cache -r requirements.txt
+
 
 # ============================================
 # Application code

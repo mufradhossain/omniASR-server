@@ -81,6 +81,16 @@ class VADConfig:
 
 
 @dataclass
+class QuantConfig:
+    """Quantization settings."""
+
+    enabled: bool = field(default_factory=lambda: env_bool("QUANT_ENABLED", False))
+    quant_type: str = field(default_factory=lambda: env_str("QUANT_TYPE", "nf4"))
+    compute_dtype: str = field(default_factory=lambda: env_str("QUANT_COMPUTE_DTYPE", "bfloat16"))
+    checkpoint_path: str = field(default_factory=lambda: env_str("QUANT_CHECKPOINT_PATH", "/app/quantized_model.pt"))
+
+
+@dataclass
 class ModelConfig:
     """Model settings."""
 
@@ -120,6 +130,7 @@ class Config:
     vad: VADConfig
     model: ModelConfig
     server: ServerConfig
+    quant: QuantConfig
 
     @classmethod
     def default(cls) -> "Config":
@@ -139,6 +150,7 @@ class Config:
             vad=vad,
             model=ModelConfig(),
             server=ServerConfig(),
+            quant=QuantConfig(),
         )
 
 

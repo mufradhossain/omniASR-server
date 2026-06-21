@@ -70,6 +70,13 @@ class ASRModel:
         if self._pipeline is not None:
             return
 
+        if config.quant.enabled:
+            self._load_quantized()
+        else:
+            self._load_standard()
+
+    def _load_standard(self) -> None:
+        """Standard pipeline load (no quantization)."""
         from omnilingual_asr.models.inference.pipeline import ASRInferencePipeline
 
         print(f"Loading ASR model '{self.model_card}' on {self.device}...")
@@ -80,6 +87,200 @@ class ASRModel:
         )
         self._load_time = time.perf_counter() - start
         print(f"Model loaded in {self._load_time:.2f}s")
+
+    def _count_fs2_linears(self, module) -> int:
+        """Count fairseq2 Linear layers in module tree."""
+        try:
+            from fairseq2.nn import Linear as Fs2Linear
+        except ImportError:
+            from fairseq2.nn.projection import Linear as Fs2Linear
+
+        count = 0
+        for _, child in module.named_children():
+            if isinstance(child, Fs2Linear):
+                count += 1
+            else:
+                count += self._count_fs2_linears(child)
+        return count
+
+    def _get_quant_layer_class(self):
+        """Return the bnb quantized Linear class based on config."""
+        from bitsandbytes.nn import Linear8bitLt, LinearNF4
+
+        qtype = config.quant.quant_type.lower()
+        if qtype == "int8":
+            return Linear8bitLt, {"has_fp16_weights": False}
+        elif qtype in ("nf4", "int4", "fp4"):
+            return LinearNF4, {}
+        else:
+            raise ValueError(f"Unsupported quant_type: {qtype}. Use 'int8' or 'nf4'.")
+
+    def _replace_fs2_linears_streaming(self, module, layer_idx: list, total: int, device: str) -> None:
+        """
+        Replace fairseq2.nn.Linear with bnb quantized layers, one at a time.
+
+        For each layer:
+            1. Clone weight from mmap to RAM (one layer only, ~50-200 MB)
+            2. Create quantized layer, load weight (quantization converts to int8/nf4)
+            3. Move quantized layer to GPU (small VRAM footprint)
+            4. Free CPU weight (mmap reclaims, RAM stays low)
+        """
+        import torch
+        import torch.nn as nn
+        try:
+            from fairseq2.nn import Linear as Fs2Linear
+        except ImportError:
+            from fairseq2.nn.projection import Linear as Fs2Linear
+
+        QuantClass, extra_kwargs = self._get_quant_layer_class()
+
+        for name, child in list(module.named_children()):
+            if isinstance(child, Fs2Linear):
+                layer_idx[0] += 1
+                idx = layer_idx[0]
+
+                in_dim = child.input_dim
+                out_dim = child.output_dim
+                has_bias = child.bias is not None
+
+                # Step 1: Load this single weight to RAM from mmap
+                w = child.weight.data.clone()
+                b = child.bias.data.clone() if has_bias else None
+
+                # Step 2: Create standard nn.Linear, then quantized layer
+                tmp = nn.Linear(in_dim, out_dim, bias=has_bias)
+                tmp.weight = nn.Parameter(w)
+                if has_bias:
+                    tmp.bias = nn.Parameter(b)
+
+                quant_lin = QuantClass(in_dim, out_dim, bias=has_bias, **extra_kwargs)
+                quant_lin.load_state_dict(tmp.state_dict())
+                del tmp, w
+                if b is not None:
+                    del b
+
+                # Step 3: Move to GPU (triggers .cuda() quantization for nf4)
+                quant_lin = quant_lin.to(device)
+
+                # Step 4: Free original CPU weight reference
+                child.weight = nn.Parameter(torch.empty(0))
+                if has_bias:
+                    child.bias = None
+
+                setattr(module, name, quant_lin)
+
+                # Progress logging
+                if idx % 25 == 0 or idx == total:
+                    vram = torch.cuda.memory_allocated() / 1e9 if 'cuda' in str(device) else 0
+                    pct = 100 * idx / total
+                    print(f"    [{idx}/{total}] {pct:.0f}% — VRAM: {vram:.2f} GB", flush=True)
+
+                if idx % 50 == 0:
+                    torch.cuda.empty_cache()
+            else:
+                self._replace_fs2_linears_streaming(child, layer_idx, total, device)
+
+    def _load_quantized(self) -> None:
+        """
+        Quantized model load with checkpoint caching.
+
+        Supports int8 (Linear8bitLt) and nf4 (LinearNF4) via QUANT_TYPE config.
+
+        First run (no checkpoint):
+            1. mmap model on CPU (weights on disk, ~0 RAM)
+            2. Stream each Linear: RAM → quantize → GPU → free
+            3. Save full-module checkpoint (architecture + quantized weights)
+        Subsequent runs (checkpoint exists):
+            Load checkpoint directly — no model download, no fairseq2, no re-quantization
+        """
+        import torch
+        from omnilingual_asr.models.inference.pipeline import ASRInferencePipeline, load_tokenizer
+        from fairseq2.models import load_model as fairseq2_load_model
+        from fairseq2.device import Device
+        from pathlib import Path
+
+        qtype = config.quant.quant_type.lower()
+        model_slug = self.model_card.replace('/', '_')
+        checkpoint_dir = Path(config.quant.checkpoint_path)
+        checkpoint = checkpoint_dir / f"{model_slug}_{qtype}.pt"
+        full_pickle = checkpoint_dir / f"{model_slug}_{qtype}_full.pt"
+
+        print(f"[1/4] Loading tokenizer for '{self.model_card}'...", flush=True)
+        tokenizer = load_tokenizer(self.model_card)
+
+        start = time.perf_counter()
+
+        if full_pickle.exists():
+            # Ultra-fast path: load full-module pickle directly — no fairseq2 at all
+            pickle_size = full_pickle.stat().st_size / 1e9
+            print(f"[2/4] Loading full-module pickle ({pickle_size:.1f} GB)...", flush=True)
+            model = torch.load(full_pickle, weights_only=False, map_location='cpu')
+            model = model.to(self.device)
+            self._load_time = time.perf_counter() - start
+            vram = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
+            print(f"Done! Model ready in {self._load_time:.1f}s, VRAM: {vram:.2f} GB", flush=True)
+            self._pipeline = ASRInferencePipeline(
+                model_card=None,
+                model=model,
+                tokenizer=tokenizer,
+                device=self.device,
+            )
+            return
+
+        if checkpoint.exists():
+            # Fast path: load state_dict checkpoint
+            # Still needs model architecture from fairseq2, but weights come from checkpoint
+            checkpoint_size = checkpoint.stat().st_size / 1e9
+            print(f"[2/4] Loading model architecture from cache...", flush=True)
+            model = fairseq2_load_model(self.model_card, device=Device('cpu'), mmap=True)
+
+            total = self._count_fs2_linears(model)
+            print(f"[3/4] Replacing {total} layers + loading {qtype} weights...", flush=True)
+            self._replace_fs2_linears_streaming(model, [0], total, self.device)
+            state = torch.load(checkpoint, weights_only=False, mmap=True)
+            model.load_state_dict(state, strict=False)
+            del state
+            model = model.to(self.device)
+
+        else:
+            # Slow path: quantize from scratch (first time only)
+            print(f"[2/4] No checkpoint found. Loading model on CPU (mmap)...", flush=True)
+            model = fairseq2_load_model(
+                self.model_card, device=Device('cpu'), dtype=torch.bfloat16, mmap=True
+            )
+
+            total = self._count_fs2_linears(model)
+            print(f"[3/4] Quantizing {total} layers to {qtype} (streaming to GPU)...", flush=True)
+            print(f"      Each layer: RAM load → {qtype} convert → GPU move → RAM free", flush=True)
+            self._replace_fs2_linears_streaming(model, [0], total, self.device)
+            model = model.to(self.device)
+
+            print(f"[4/4] Saving state_dict checkpoint...", flush=True)
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), checkpoint)
+            checkpoint_size = checkpoint.stat().st_size / 1e9
+            print(f"      Saved: {checkpoint.name} ({checkpoint_size:.1f} GB)", flush=True)
+
+        # Save full-module pickle for zero-download future loads
+        print(f"Saving full-module pickle for fast future loading...", flush=True)
+        model_cpu = model.cpu()
+        torch.cuda.empty_cache()
+        torch.save(model_cpu, full_pickle)
+        del model_cpu
+        full_size = full_pickle.stat().st_size / 1e9
+        print(f"      Saved: {full_pickle.name} ({full_size:.1f} GB)", flush=True)
+        model = model.to(self.device)
+
+        self._pipeline = ASRInferencePipeline(
+            model_card=None,
+            model=model,
+            tokenizer=tokenizer,
+            device=self.device,
+        )
+        self._load_time = time.perf_counter() - start
+
+        vram = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
+        print(f"Done! Model ready in {self._load_time:.1f}s, VRAM: {vram:.2f} GB", flush=True)
 
     def ensure_loaded(self) -> None:
         """Ensure model is loaded."""
