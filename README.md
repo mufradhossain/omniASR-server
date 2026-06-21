@@ -37,30 +37,28 @@ Server starts at `http://localhost:8000`
 
 ### Option 2: Docker with Quantization (Recommended — No 29 GB Download)
 
-Pre-quantized checkpoints (int8 or nf4) are available on HuggingFace. No need to download the original 29 GB model.
+Pre-quantized checkpoints are available on HuggingFace. No need to download the original 29 GB model.
 
 ```bash
 # 1. Clone
 git clone https://github.com/mufradhossain/omniASR-server.git
 cd omniASR-server
 
-# 2. Download the quantized checkpoint
-#    Choose one:
-#      - omniASR_LLM_7B_v2_int8_full.pt   (15 GB,  ~8 GB VRAM, higher quality)
-#      - omniASR_LLM_7B_v2_nf4_full.pt    (3.9 GB, ~4 GB VRAM, efficient)
+# 2. Download the int8 checkpoint (default, higher quality)
 mkdir -p checkpoints
-# Download from: https://huggingface.co/sheikhmufrad/omniASR-LLM-7B-v2-quantized
-# Place the .pt file in ./checkpoints/
+# Download omniASR_LLM_7B_v2_int8_full.pt (15 GB, ~8 GB VRAM) from:
+#   https://huggingface.co/sheikhmufrad/omniASR-LLM-7B-v2-quantized
+# Place it in ./checkpoints/
 
-# 3. (Optional) Customize settings
+# 3. (Optional) Switch to nf4 (3.9 GB, ~4 GB VRAM)
 cp .env.example .env
-# Edit .env to switch between int8 (default) and nf4
+# Change QUANT_TYPE to nf4 in .env, then download the nf4 pickle instead
 
 # 4. Start the server
 docker compose up -d
 ```
 
-Server loads in ~2.5 minutes (int8) or ~38 seconds (nf4) at `http://localhost:8000`.
+Server loads in ~2.5 minutes (int8) or ~38 seconds (nf4) at `http://localhost:8000`. No `.env` file needed for default int8.
 
 ### Option 3: Docker (Original — Downloads 29 GB)
 
