@@ -25,9 +25,9 @@ services:
       - DEFAULT_LANG=${DEFAULT_LANG:-eng_Latn}
       - HOST=0.0.0.0
       - PORT=8000
-      - QUANT_ENABLED=${QUANT_ENABLED:-false}
-      - QUANT_TYPE=${QUANT_TYPE:-nf4}
-      - QUANT_CHECKPOINT_PATH=${QUANT_CHECKPOINT_PATH:-/app/quantized_model.pt}
+      - QUANT_ENABLED=${QUANT_ENABLED:-true}
+      - QUANT_TYPE=${QUANT_TYPE:-int8}
+      - QUANT_CHECKPOINT_PATH=${QUANT_CHECKPOINT_PATH:-/app/checkpoints}
     volumes:
       # Cache model weights (persist across restarts)
       - omniasr-cache:/root/.cache
@@ -46,7 +46,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 600s
+      start_period: 300s
 
   # ============================================
   # CPU Version (no GPU required)
@@ -67,9 +67,9 @@ services:
       - DEVICE=cpu
       - HOST=0.0.0.0
       - PORT=8000
-      - QUANT_ENABLED=${QUANT_ENABLED:-false}
-      - QUANT_TYPE=${QUANT_TYPE:-nf4}
-      - QUANT_CHECKPOINT_PATH=${QUANT_CHECKPOINT_PATH:-/app/quantized_model.pt}
+      - QUANT_ENABLED=false
+      - QUANT_TYPE=int8
+      - QUANT_CHECKPOINT_PATH=/app/checkpoints
     volumes:
       - omniasr-cache:/root/.cache
       - ./checkpoints:/app/checkpoints
@@ -79,7 +79,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 600s
+      start_period: 300s
 
 volumes:
   omniasr-cache:

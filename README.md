@@ -35,11 +35,38 @@ python server.py
 
 Server starts at `http://localhost:8000`
 
-### Option 2: Docker (Recommended for Production) (Supports CUDA and CPU, no MPS)
+### Option 2: Docker with Quantization (Recommended — No 29 GB Download)
+
+Pre-quantized checkpoints (int8 or nf4) are available on HuggingFace. No need to download the original 29 GB model.
+
+```bash
+# 1. Clone
+git clone https://github.com/mufradhossain/omniASR-server.git
+cd omniASR-server
+
+# 2. Download the quantized checkpoint
+#    Choose one:
+#      - omniASR_LLM_7B_v2_int8_full.pt   (15 GB,  ~8 GB VRAM, higher quality)
+#      - omniASR_LLM_7B_v2_nf4_full.pt    (3.9 GB, ~4 GB VRAM, efficient)
+mkdir -p checkpoints
+# Download from: https://huggingface.co/sheikhmufrad/omniASR-LLM-7B-v2-quantized
+# Place the .pt file in ./checkpoints/
+
+# 3. (Optional) Customize settings
+cp .env.example .env
+# Edit .env to switch between int8 (default) and nf4
+
+# 4. Start the server
+docker compose up -d
+```
+
+Server loads in ~2.5 minutes (int8) or ~38 seconds (nf4) at `http://localhost:8000`.
+
+### Option 3: Docker (Original — Downloads 29 GB)
 
 ```bash
 # With NVIDIA GPU
-docker compose up -d
+QUANT_ENABLED=false docker compose up -d
 
 # CPU only
 docker compose --profile cpu up -d
