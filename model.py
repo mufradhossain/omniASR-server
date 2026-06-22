@@ -6,6 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass
 import numpy as np
 import torch
+from bitsandbytes.nn import Linear8bitLt, LinearNF4
 
 from config import config
 
@@ -105,8 +106,6 @@ class ASRModel:
 
     def _get_quant_layer_class(self):
         """Return the bnb quantized Linear class based on config."""
-        from bitsandbytes.nn import Linear8bitLt, LinearNF4
-
         qtype = config.quant.quant_type.lower()
         if qtype == "int8":
             return Linear8bitLt, {"has_fp16_weights": False}
@@ -180,6 +179,43 @@ class ASRModel:
             else:
                 self._replace_fs2_linears_streaming(child, layer_idx, total, device)
 
+    def _restore_quant_to_device(self, model) -> None:
+        """Move all model weights to GPU after loading from pickle.
+
+        bitsandbytes Params4bit/Int8Params lose their CUDA context during
+        torch.save()/torch.load(). This re-establishes the device mapping
+        for quantized layers and moves regular layers normally.
+        """
+        device = self.device
+        fixed = 0
+        # First move non-quantized layers normally
+        for module in model.modules():
+            if not isinstance(module, (LinearNF4, Linear8bitLt)):
+                for param in module.parameters(recurse=False):
+                    param.data = param.data.to(device)
+                for buf in module.buffers(recurse=False):
+                    buf.data = buf.data.to(device)
+
+        # Then fix quantized layers individually
+        for module in model.modules():
+            if isinstance(module, (LinearNF4, Linear8bitLt)):
+                w = module.weight
+                w.data = w.data.to(device)
+                if hasattr(w, 'quant_state') and w.quant_state is not None:
+                    w.quant_state = w.quant_state.to(device)
+                if module.bias is not None:
+                    module.bias.data = module.bias.data.to(device)
+                # Linear8bitLt has a separate state object with CB/SCB tensors
+                if hasattr(module, 'state') and module.state is not None:
+                    for attr in ['CB', 'SCB', 'CxB', 'SB']:
+                        tensor = getattr(module.state, attr, None)
+                        if tensor is not None:
+                            setattr(module.state, attr, tensor.to(device))
+                fixed += 1
+                if fixed % 200 == 0:
+                    torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
+
     def _load_quantized(self) -> None:
         """
         Quantized model load with checkpoint caching.
@@ -215,7 +251,11 @@ class ASRModel:
             pickle_size = full_pickle.stat().st_size / 1e9
             print(f"[2/4] Loading full-module pickle ({pickle_size:.1f} GB)...", flush=True)
             model = torch.load(full_pickle, weights_only=False, map_location='cpu')
-            model = model.to(self.device)
+
+            # Fix quantized layer device states (lost during pickle)
+            print(f"[3/4] Restoring quantized states to GPU...", flush=True)
+            self._restore_quant_to_device(model)
+
             self._load_time = time.perf_counter() - start
             vram = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
             print(f"Done! Model ready in {self._load_time:.1f}s, VRAM: {vram:.2f} GB", flush=True)
@@ -232,7 +272,7 @@ class ASRModel:
             # Still needs model architecture from fairseq2, but weights come from checkpoint
             checkpoint_size = checkpoint.stat().st_size / 1e9
             print(f"[2/4] Loading model architecture from cache...", flush=True)
-            model = fairseq2_load_model(self.model_card, device=Device('cpu'), mmap=True)
+            model = fairseq2_load_model(self.model_card, device=Device('cpu'), dtype=torch.bfloat16, mmap=True)
 
             total = self._count_fs2_linears(model)
             print(f"[3/4] Replacing {total} layers + loading {qtype} weights...", flush=True)
@@ -261,15 +301,15 @@ class ASRModel:
             checkpoint_size = checkpoint.stat().st_size / 1e9
             print(f"      Saved: {checkpoint.name} ({checkpoint_size:.1f} GB)", flush=True)
 
-        # Save full-module pickle for zero-download future loads
-        print(f"Saving full-module pickle for fast future loading...", flush=True)
-        model_cpu = model.cpu()
-        torch.cuda.empty_cache()
-        torch.save(model_cpu, full_pickle)
-        del model_cpu
-        full_size = full_pickle.stat().st_size / 1e9
-        print(f"      Saved: {full_pickle.name} ({full_size:.1f} GB)", flush=True)
-        model = model.to(self.device)
+            # Save full-module pickle for zero-download future loads
+            print(f"      Saving full-module pickle...", flush=True)
+            model_cpu = model.cpu()
+            torch.cuda.empty_cache()
+            torch.save(model_cpu, full_pickle)
+            del model_cpu
+            full_size = full_pickle.stat().st_size / 1e9
+            print(f"      Saved: {full_pickle.name} ({full_size:.1f} GB)", flush=True)
+            model = model.to(self.device)
 
         self._pipeline = ASRInferencePipeline(
             model_card=None,
@@ -417,26 +457,42 @@ class ASRModel:
 
         print(f"Long audio ({total_duration:.1f}s) split into {len(segments)} chunks")
 
-        # Transcribe each chunk
-        transcription_segments = []
-        total_latency = 0.0
+        # Write all chunks to temp files and batch-transcribe
+        import tempfile
+        import os
+        temp_files = []
+        batch_size = config.model.batch_size
 
         for i, segment in enumerate(segments):
-            print(f"  Transcribing chunk {i+1}/{len(segments)} ({segment.duration:.1f}s)...")
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            sf.write(tmp.name, segment.audio.astype(np.float32), segment.sample_rate)
+            temp_files.append(tmp.name)
 
-            result = self.transcribe_audio(
-                segment.audio,
-                sample_rate=segment.sample_rate,
-                lang=lang,
+        try:
+            lang_param = lang if lang is not None else self.lang
+            print(f"  Batch transcribing {len(temp_files)} chunks (batch_size={batch_size})...")
+
+            start = time.perf_counter()
+            results = self._pipeline.transcribe(
+                temp_files,
+                lang=[lang_param] * len(temp_files) if lang_param else None,
+                batch_size=batch_size,
             )
+            total_latency = time.perf_counter() - start
 
-            total_latency += result.latency
+            transcription_segments = []
+            for i, (segment, text) in enumerate(zip(segments, results)):
+                text = text if text else ""
+                transcription_segments.append(TranscriptionSegment(
+                    text=text,
+                    start_time=segment.start_time,
+                    end_time=segment.end_time,
+                ))
+                print(f"  Chunk {i+1}/{len(segments)} done")
 
-            transcription_segments.append(TranscriptionSegment(
-                text=result.text,
-                start_time=segment.start_time,
-                end_time=segment.end_time,
-            ))
+        finally:
+            for f in temp_files:
+                os.unlink(f)
 
         # Merge transcriptions
         merged_text = merge_transcriptions(transcription_segments)

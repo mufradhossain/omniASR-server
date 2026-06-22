@@ -26,8 +26,9 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - QUANT_ENABLED=${QUANT_ENABLED:-true}
-      - QUANT_TYPE=${QUANT_TYPE:-int8}
+      - QUANT_TYPE=${QUANT_TYPE:-nf4}
       - QUANT_CHECKPOINT_PATH=${QUANT_CHECKPOINT_PATH:-/app/checkpoints}
+      - BATCH_SIZE=${BATCH_SIZE:-8}
     volumes:
       # Cache model weights (persist across restarts)
       - omniasr-cache:/root/.cache

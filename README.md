@@ -4,6 +4,8 @@ An OpenAI-compatible ASR (Automatic Speech Recognition) API server powered by Me
 
 ## Features
 
+- **4-bit Quantized** - NF4 quantization with bitsandbytes — runs on 4 GB VRAM, no 29 GB download
+- **Batch Inference** - Processes multiple audio chunks in parallel (batch_size=8) for 2x+ speedup
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint
 - **Real-time Streaming** - WebSocket support for live transcription
 - **Long Audio Support** - Automatically handles files **longer than 40 seconds**
@@ -37,28 +39,30 @@ Server starts at `http://localhost:8000`
 
 ### Option 2: Docker with Quantization (Recommended — No 29 GB Download)
 
-Pre-quantized checkpoints are available on HuggingFace. No need to download the original 29 GB model.
+Pre-quantized NF4 checkpoint is available on HuggingFace. No need to download the original 29 GB model.
 
 ```bash
 # 1. Clone
 git clone https://github.com/mufradhossain/omniASR-server.git
 cd omniASR-server
 
-# 2. Download the int8 checkpoint (default, higher quality)
+# 2. Download the NF4 checkpoint (3.9 GB, ~4 GB VRAM)
 mkdir -p checkpoints
-# Download omniASR_LLM_7B_v2_int8_full.pt (15 GB, ~8 GB VRAM) from:
+# Download omniASR_LLM_7B_v2_nf4_full.pt from:
 #   https://huggingface.co/sheikhmufrad/omniASR-LLM-7B-v2-quantized
 # Place it in ./checkpoints/
 
-# 3. (Optional) Switch to nf4 (3.9 GB, ~4 GB VRAM)
-cp .env.example .env
-# Change QUANT_TYPE to nf4 in .env, then download the nf4 pickle instead
-
-# 4. Start the server
+# 3. Start the server
 docker compose up -d
 ```
 
-Server loads in ~2.5 minutes (int8) or ~38 seconds (nf4) at `http://localhost:8000`. No `.env` file needed for default int8.
+Server loads in ~32 seconds at `http://localhost:8000`. No `.env` file needed — defaults to NF4 with batch_size=8.
+
+**Performance:**
+
+| Config | Load time | VRAM (idle) | VRAM (peak) | RTF |
+|--------|-----------|-------------|-------------|-----|
+| NF4 + batch 8 | 32s | 4.2 GB | ~12.3 GB | 0.23 |
 
 ### Option 3: Docker (Original — Downloads 29 GB)
 
