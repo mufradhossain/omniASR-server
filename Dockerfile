@@ -49,8 +49,11 @@ ENV HOST=0.0.0.0
 ENV PORT=8000
 
 # Model settings (can be overridden)
-ENV MODEL_CARD=omniASR_CTC_300M_v2
-ENV DEFAULT_LANG=eng_Latn
+ENV MODEL_CARD=omniASR_LLM_7B_v2
+ENV DEFAULT_LANG=ben_Beng
+ENV BATCH_SIZE=8
+ENV QUANT_ENABLED=true
+ENV QUANT_TYPE=nf4
 
 # Device auto-detection (cuda if available, else cpu)
 # Can override with: ENV DEVICE=cuda or ENV DEVICE=cpu

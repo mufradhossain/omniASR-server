@@ -1,16 +1,17 @@
 # omniASR Streaming Server - Docker Compose
 #
 # Usage:
-#   GPU:  docker compose up -d
-#   CPU:  docker compose --profile cpu up -d
+#   Server:   docker compose up -d
+#   CPU:      docker compose --profile cpu up -d
+#   Batch:    docker compose run --rm omniASR-batch
 #
-# Or use specific service:
-#   docker compose up omniASR-gpu -d
-#   docker compose up omniASR-cpu -d
+# Batch processing (with resume):
+#   docker compose run --rm omniASR-batch /audio /output --batch-size 8
+#   Re-run anytime — skips completed files automatically.
 
 services:
   # ============================================
-  # GPU Version (NVIDIA CUDA)
+  # GPU Server (NVIDIA CUDA)
   # ============================================
   omniASR-gpu:
     build:
@@ -21,8 +22,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MODEL_CARD=${MODEL_CARD:-omniASR_CTC_300M_v2}
-      - DEFAULT_LANG=${DEFAULT_LANG:-eng_Latn}
+      - MODEL_CARD=${MODEL_CARD:-omniASR_LLM_7B_v2}
+      - DEFAULT_LANG=${DEFAULT_LANG:-ben_Beng}
       - HOST=0.0.0.0
       - PORT=8000
       - QUANT_ENABLED=${QUANT_ENABLED:-true}
@@ -32,8 +33,11 @@ services:
     volumes:
       # Cache model weights (persist across restarts)
       - omniasr-cache:/root/.cache
-      # Quantized checkpoints (local bind mount)
+      # Quantized checkpoints (NF4 pickle)
       - ./checkpoints:/app/checkpoints
+      # Audio input + transcript output (for batch mode or API file access)
+      - ./audio:/audio
+      - ./transcripts:/output
     deploy:
       resources:
         reservations:
@@ -50,7 +54,46 @@ services:
       start_period: 300s
 
   # ============================================
-  # CPU Version (no GPU required)
+  # Batch Transcription (GPU)
+  #
+  # Processes all audio files in /audio, outputs .txt to /output.
+  # Resume: re-run anytime — manifest.json tracks progress.
+  #
+  #   docker compose run --rm omniASR-batch
+  #   docker compose run --rm omniASR-batch /audio /output --batch-size 8
+  #   docker compose run --rm omniASR-batch /audio /output --lang ben_Beng --ext wav mp3
+  # ============================================
+  omniASR-batch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: omniasr-server:latest
+    container_name: omniasr-batch
+    profiles: ["batch"]
+    environment:
+      - MODEL_CARD=${MODEL_CARD:-omniASR_LLM_7B_v2}
+      - DEFAULT_LANG=${DEFAULT_LANG:-ben_Beng}
+      - DEVICE=cuda
+      - QUANT_ENABLED=${QUANT_ENABLED:-true}
+      - QUANT_TYPE=${QUANT_TYPE:-nf4}
+      - QUANT_CHECKPOINT_PATH=${QUANT_CHECKPOINT_PATH:-/app/checkpoints}
+      - BATCH_SIZE=${BATCH_SIZE:-8}
+    volumes:
+      - omniasr-cache:/root/.cache
+      - ./checkpoints:/app/checkpoints
+      - ./audio:/audio
+      - ./transcripts:/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    entrypoint: ["python", "batch_transcribe.py"]
+
+  # ============================================
+  # CPU Server (no GPU required)
   # ============================================
   omniASR-cpu:
     build:
@@ -63,17 +106,20 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MODEL_CARD=${MODEL_CARD:-omniASR_CTC_300M_v2}
-      - DEFAULT_LANG=${DEFAULT_LANG:-eng_Latn}
+      - MODEL_CARD=${MODEL_CARD:-omniASR_LLM_7B_v2}
+      - DEFAULT_LANG=${DEFAULT_LANG:-ben_Beng}
       - DEVICE=cpu
       - HOST=0.0.0.0
       - PORT=8000
       - QUANT_ENABLED=false
       - QUANT_TYPE=int8
       - QUANT_CHECKPOINT_PATH=/app/checkpoints
+      - BATCH_SIZE=1
     volumes:
       - omniasr-cache:/root/.cache
       - ./checkpoints:/app/checkpoints
+      - ./audio:/audio
+      - ./transcripts:/output
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

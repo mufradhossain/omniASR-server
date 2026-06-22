@@ -4,8 +4,9 @@ An OpenAI-compatible ASR (Automatic Speech Recognition) API server powered by Me
 
 ## Features
 
+- **Batch Transcription** - Process thousands of files with resume support (`docker compose run --rm omniASR-batch`)
 - **4-bit Quantized** - NF4 quantization with bitsandbytes — runs on 4 GB VRAM, no 29 GB download
-- **Batch Inference** - Processes multiple audio chunks in parallel (batch_size=8) for 2x+ speedup
+- **Batch Inference** - Processes 8 audio files per GPU pass for maximum throughput
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint
 - **Real-time Streaming** - WebSocket support for live transcription
 - **Long Audio Support** - Automatically handles files **longer than 40 seconds**
@@ -72,6 +73,111 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 | Config | Load time | VRAM (idle) | VRAM (peak) | RTF |
 |--------|-----------|-------------|-------------|-----|
 | NF4 + batch 8 | 32s | 4.2 GB | ~12.3 GB | 0.23 |
+
+## Batch Transcription (Thousands of Files with Resume)
+
+Transcribe large audio corpora — e.g. 350 hours of Bangla audio across 100k+ short files. Processes files in GPU batches of 8 and resumes automatically after crashes.
+
+### Quick Start
+
+```bash
+# 1. Put audio files in ./audio/  (wav, mp3, flac, m4a, ogg, opus)
+mkdir -p audio transcripts
+cp /path/to/bangla_corpus/*.wav audio/
+
+# 2. Run batch transcription
+docker compose run --rm omniASR-batch
+
+# 3. Check output
+ls transcripts/
+# clip_001.txt  clip_002.txt  ...  manifest.json
+```
+
+That's it. All defaults are pre-configured: `ben_Beng`, NF4 quant, `batch_size=8`.
+
+### How It Works
+
+```
+batch_transcribe.py
+  ├── Scans ./audio/ for all audio files (recursive)
+  ├── Groups into batches of 8
+  ├── Sends each batch in one GPU pass (not one-by-one)
+  ├── Writes .txt per file to ./transcripts/
+  └── Saves manifest.json for resume
+```
+
+### Resume — Kill Anytime, Restart Anytime
+
+The `manifest.json` in the output directory tracks every file's status. If the process crashes, runs out of memory, or you Ctrl-C it:
+
+```bash
+# Just re-run the same command
+docker compose run --rm omniASR-batch
+```
+
+It reads the manifest, skips all completed files, and continues from where it stopped. You lose at most one batch of 8 files (~96 seconds of work).
+
+### Options
+
+```bash
+# Custom language
+docker compose run --rm omniASR-batch /audio /output --lang ben_Beng
+
+# Different batch size
+docker compose run --rm omniASR-batch /audio /output --batch-size 16
+
+# Only specific file extensions
+docker compose run --rm omniASR-batch /audio /output --ext wav mp3
+
+# Full options
+docker compose run --rm omniASR-batch --help
+```
+
+### Expected Throughput
+
+| GPU | Batch Size | ~Files/sec | 350hr (~105k files) |
+|-----|-----------|------------|---------------------|
+| RTX 5090 / A100 | 8 | ~12-15 | ~2-2.5 hours |
+| RTX 4090 | 8 | ~8-10 | ~3-3.5 hours |
+| RTX 3060 (12GB) | 8 | ~4-5 | ~6-7 hours |
+
+### Output Structure
+
+```
+transcripts/
+├── manifest.json                    # resume state (do not delete)
+├── clip_001.txt                     # one .txt per audio file
+├── clip_002.txt
+├── subdir/                          # preserves input folder structure
+│   └── clip_003.txt
+```
+
+### Custom Audio/Output Paths
+
+The compose file mounts `./audio:/audio` and `./transcripts:/output` by default. To use different paths, edit `docker-compose.yml` under the `omniASR-batch` service:
+
+```yaml
+volumes:
+  - /data/my_corpus:/audio
+  - /data/my_transcripts:/output
+```
+
+### Server + Batch Simultaneously
+
+The server (`omniASR-gpu`) and batch tool (`omniASR-batch`) are separate containers. You can run the API server while batch processing, but both load the model into VRAM separately:
+
+```bash
+docker compose up -d                                    # server on :8000
+docker compose run --rm omniASR-batch                   # batch (needs its own VRAM)
+```
+
+If you don't have enough VRAM for both, stop the server first:
+
+```bash
+docker compose stop
+docker compose run --rm omniASR-batch
+docker compose start   # restart server after batch is done
+```
 
 ### Option 3: Docker (Original — Downloads 29 GB)
 
@@ -242,8 +348,8 @@ data: [DONE]
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_CARD` | `omniASR_CTC_300M_v2` | Model to use |
-| `DEFAULT_LANG` | `eng_Latn` | Default language (empty for auto-detect) |
+| `MODEL_CARD` | `omniASR_LLM_7B_v2` | Model to use |
+| `DEFAULT_LANG` | `ben_Beng` | Default language (empty for auto-detect) |
 | `DEVICE` | auto | `cuda`, `mps`, `cpu`, or auto-detect |
 | `HOST` | `0.0.0.0` | Server host |
 | `PORT` | `8000` | Server port |
@@ -253,7 +359,7 @@ data: [DONE]
 | `MAX_WEBSOCKET_CONNECTIONS` | `50` | Max simultaneous WebSocket connections |
 | `QUANT_ENABLED` | `true` | Enable NF4 quantization (no 29 GB download) |
 | `QUANT_TYPE` | `nf4` | Quantization type (`nf4` = 4-bit) |
-| `BATCH_SIZE` | `8` | Batch size for chunk inference (higher = faster, more VRAM) |
+| `BATCH_SIZE` | `8` | Files per GPU batch (higher = faster, more VRAM) |
 
 ### Using .env file
 
@@ -284,8 +390,11 @@ This server supports all models from [Meta's omniASR](https://github.com/faceboo
 
 ```yaml
 # docker-compose.yml is included
-# GPU deployment
+# GPU server deployment
 docker compose up -d
+
+# Batch transcription (with resume)
+docker compose run --rm omniASR-batch
 
 # CPU deployment
 docker compose --profile cpu up -d
@@ -423,6 +532,7 @@ python test_streaming.py websocket
 ```
 omniASR_server/
 ├── server.py            # FastAPI app
+├── batch_transcribe.py  # Batch transcription CLI (thousands of files + resume)
 ├── config.py            # Configuration (env vars)
 ├── model.py             # ASR model wrapper
 ├── streaming.py         # Streaming transcriber

@@ -94,9 +94,9 @@ class QuantConfig:
 class ModelConfig:
     """Model settings."""
 
-    model_card: str = field(default_factory=lambda: env_str("MODEL_CARD", "omniASR_CTC_300M_v2"))
-    default_lang: str | None = field(default_factory=lambda: env_optional_str("DEFAULT_LANG", "eng_Latn"))
-    batch_size: int = field(default_factory=lambda: env_int("BATCH_SIZE", 1))
+    model_card: str = field(default_factory=lambda: env_str("MODEL_CARD", "omniASR_LLM_7B_v2"))
+    default_lang: str | None = field(default_factory=lambda: env_optional_str("DEFAULT_LANG", "ben_Beng"))
+    batch_size: int = field(default_factory=lambda: env_int("BATCH_SIZE", 8))
     device: str | None = field(default_factory=lambda: env_optional_str("DEVICE", None))  # None = auto-detect
 
 

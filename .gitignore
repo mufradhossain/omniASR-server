@@ -64,6 +64,10 @@ logs/
 *.ogg
 *.m4a
 
+# Batch processing runtime dirs
+audio/
+transcripts/
+
 # Model cache (large files)
 *.pt
 *.pth

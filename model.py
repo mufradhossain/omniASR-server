@@ -415,6 +415,56 @@ class ASRModel:
             # Cleanup temp file
             Path(temp_path).unlink(missing_ok=True)
 
+    def transcribe_batch(
+        self,
+        audio_paths: list[str | Path],
+        lang: str = None,
+    ) -> list[TranscribeResult]:
+        """
+        Transcribe multiple short files in a single batched inference call.
+
+        All files should be under 40s — no chunking is performed.
+
+        Args:
+            audio_paths: List of audio file paths
+            lang: Language code or None for auto-detect
+
+        Returns:
+            List of TranscribeResult, one per input file (same order)
+        """
+        self.ensure_loaded()
+
+        import soundfile as sf
+
+        durations = []
+        for path in audio_paths:
+            try:
+                info = sf.info(str(path))
+                durations.append(info.duration)
+            except Exception:
+                durations.append(0.0)
+
+        lang_param = lang if lang is not None else self.lang
+        n = len(audio_paths)
+
+        start = time.perf_counter()
+        results = self._pipeline.transcribe(
+            [str(p) for p in audio_paths],
+            lang=[lang_param] * n if lang_param else None,
+            batch_size=n,
+        )
+        latency = time.perf_counter() - start
+
+        return [
+            TranscribeResult(
+                text=text if text else "",
+                duration=dur,
+                latency=latency,
+                rtf=latency / dur if dur > 0 else 0,
+            )
+            for text, dur in zip(results, durations)
+        ]
+
     def transcribe_long_file(
         self,
         audio_path: str | Path,
