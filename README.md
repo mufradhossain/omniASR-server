@@ -41,6 +41,8 @@ Server starts at `http://localhost:8000`
 
 Pre-quantized NF4 checkpoint is available on HuggingFace. No need to download the original 29 GB model.
 
+**Requirements:** NVIDIA GPU with 12+ GB VRAM, Docker Desktop with GPU support.
+
 ```bash
 # 1. Clone
 git clone https://github.com/mufradhossain/omniASR-server.git
@@ -57,6 +59,13 @@ docker compose up -d
 ```
 
 Server loads in ~32 seconds at `http://localhost:8000`. No `.env` file needed — defaults to NF4 with batch_size=8.
+
+Test it:
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "response_format=verbose_json"
+```
 
 **Performance:**
 
@@ -242,6 +251,9 @@ data: [DONE]
 | `VAD_ENABLED` | `true` | Voice activity detection |
 | `MAX_CONCURRENT_REQUESTS` | `100` | Max simultaneous REST requests |
 | `MAX_WEBSOCKET_CONNECTIONS` | `50` | Max simultaneous WebSocket connections |
+| `QUANT_ENABLED` | `true` | Enable NF4 quantization (no 29 GB download) |
+| `QUANT_TYPE` | `nf4` | Quantization type (`nf4` = 4-bit) |
+| `BATCH_SIZE` | `8` | Batch size for chunk inference (higher = faster, more VRAM) |
 
 ### Using .env file
 
